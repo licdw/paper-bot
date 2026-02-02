@@ -24,7 +24,7 @@ def log(msg):
 # ==========================================
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 # [必须修改] 请填入你的真实邮箱
-ENTREZ_EMAIL = "your_real_email@gmail.com" 
+ENTREZ_EMAIL = "dongwei_li@hotmail.com" 
 
 if not GOOGLE_API_KEY:
     raise ValueError("❌ 未找到 GOOGLE_API_KEY，请检查环境变量设置")
