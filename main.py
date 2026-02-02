@@ -4,8 +4,8 @@ import time
 import requests
 import re
 import sys
+import datetime  # [已修复] 补回了这个关键模块
 from Bio import Entrez
-# [核心改动] 引入新版 SDK
 from google import genai
 
 # ==========================================
@@ -19,7 +19,8 @@ def log(msg):
 # 1. 基础配置与鉴权
 # ==========================================
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-ENTREZ_EMAIL = "dongwei_li@hotmail.com"  # [确认] 必须是你刚才修改过的真实邮箱
+# [必须修改] 请确保这里填的是你的真实邮箱！
+ENTREZ_EMAIL = "dongwei_li@hotmail.com" 
 
 if not GOOGLE_API_KEY:
     raise ValueError("❌ 未找到 GOOGLE_API_KEY，请检查环境变量设置")
@@ -31,8 +32,7 @@ if "your_real_email" in ENTREZ_EMAIL or "@" not in ENTREZ_EMAIL:
 
 Entrez.email = ENTREZ_EMAIL
 
-# [核心改动] 初始化新版 Client
-# 注意：新库不需要 genai.configure，直接实例化 Client
+# 初始化新版 Client
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # ==========================================
@@ -154,7 +154,7 @@ def contains_keywords(text):
 # 5. 各平台抓取函数
 # ==========================================
 
-def fetch_arxiv(seen_set, max_results=5): # [优化] 增加到5篇
+def fetch_arxiv(seen_set, max_results=5): # [保持] 5篇
     log("📡 [ArXiv] 正在连接...")
     papers = []
     query = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat])
@@ -181,7 +181,8 @@ def fetch_biorxiv(seen_set, limit=4):
     papers = []
     try:
         today = datetime.date.today()
-        from_date = today - datetime.timedelta(days=10) # [优化] 保持10天搜索范围
+        # [保持] 10天范围，确保能抓到论文
+        from_date = today - datetime.timedelta(days=10) 
         cursor = "0"
         total_fetched = 0
         
@@ -227,7 +228,8 @@ def fetch_pubmed(seen_set, max_results=3):
     log("📡 [PubMed] 正在连接...")
     papers = []
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    past_str = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y/%m/%d") # [优化] 保持10天
+    # [保持] 10天范围
+    past_str = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y/%m/%d") 
     date_term = f' AND ("{past_str}"[PDAT] : "{today_str}"[PDAT])'
     
     term = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat]) + date_term
@@ -285,8 +287,7 @@ def process_papers(papers):
         )
         
         try:
-            # [核心改动] 使用新版 SDK 调用方式
-            # 注意：新库方法是 client.models.generate_content
+            # [新版 SDK 调用]
             response = client.models.generate_content(
                 model='gemini-1.5-flash',
                 contents=prompt
@@ -307,7 +308,7 @@ def process_papers(papers):
     return report_content
 
 def main():
-    log("🚀 启动 Bio-AI 全网情报抓取 (v7.0 Upgrade)...")
+    log("🚀 启动 Bio-AI 全网情报抓取 (v7.1 Fixed)...")
     seen_papers = set()
     all_papers = []
     
