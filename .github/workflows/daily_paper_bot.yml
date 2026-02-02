@@ -2,8 +2,11 @@ name: Daily AI Paper Digest
 
 on:
   schedule:
-    # 北京时间每天早上 08:00 (UTC 00:00)
-    - cron: '0 0 * * *'
+    # ⚠️ 核心修改：北京时间凌晨 04:00 启动
+    # GitHub 使用 UTC 时间，所以是前一天的 20:00
+    # 20:00 UTC + 8小时 = 04:00 北京时间
+    - cron: '0 20 * * *'
+  
   # 允许手动触发测试
   workflow_dispatch:
 
@@ -16,12 +19,12 @@ jobs:
       
     steps:
     - name: Check out repository code
-      uses: actions/checkout@v4  # 升级到 v4
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v5  # 升级到 v5
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.12'  # 升级到 3.12
+        python-version: '3.12'
 
     - name: Install dependencies
       run: |
@@ -30,12 +33,16 @@ jobs:
 
     - name: Run paper summarizer & Save output
       env:
+        # 👇 必须把所有 Secrets 显式注入环境变量，Python 才能读取！
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-      # Python 脚本中的 log() 会显示在 Actions 控制台
-      # Python 脚本中的 print() 会被写入 report.md
+        ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}    # 智谱 Key
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}   # 邮箱应用密码
+      
+      # 运行脚本，标准输出保存到 report.md (用于 Artifact)，同时脚本内部会发邮件
       run: python main.py > report.md
 
     - name: Upload Daily Report
+      # 即使发了邮件，也上传一份到 GitHub 作为备份
       uses: actions/upload-artifact@v4
       with:
         name: Daily-Paper-Report
