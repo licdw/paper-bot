@@ -6,168 +6,167 @@ import re
 import sys
 import datetime
 import json
+import random
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from Bio import Entrez
 from google import genai
 from google.genai import types
 
 # ==========================================
-# 0. 日志与配置
+# 0. 配置与日志
 # ==========================================
 def log(msg):
-    """将日志打印到标准错误流 (stderr)"""
     print(msg, file=sys.stderr)
 
-# 获取 Key
+# API Keys & Config
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY') # [新增] 从环境变量获取
-ENTREZ_EMAIL = "dongwei_li@hotmail.com"
+ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY')
+EMAIL_USER = "dongwei_li@hotmail.com" 
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+EMAIL_TO = "dongwei_li@hotmail.com"
 
-# 检查配置
-if not GOOGLE_API_KEY:
-    raise ValueError("❌ 未找到 GOOGLE_API_KEY")
-if not ZHIPU_API_KEY:
-    log("⚠️ 未找到 ZHIPU_API_KEY，将仅使用 Gemini 模式")
+# [核心修改] 严格的冷却时间配置 (秒)
+GEMINI_COOLDOWN = 300  # Gemini 休息 5 分钟
+ZHIPU_COOLDOWN = 180   # 智谱 休息 3 分钟
 
-if "@" not in ENTREZ_EMAIL:
-    log("❌ 错误：邮箱格式不正确！")
-    sys.exit(1)
+if not GOOGLE_API_KEY: raise ValueError("❌ 未找到 GOOGLE_API_KEY")
+Entrez.email = EMAIL_USER
 
-Entrez.email = ENTREZ_EMAIL
-
-# 初始化 Gemini 客户端
+# 初始化
 client_gemini = genai.Client(api_key=GOOGLE_API_KEY)
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # ==========================================
-# 1. 双模型底层封装 (核心升级)
+# 1. 邮件发送模块
 # ==========================================
+def send_email(subject, body_markdown):
+    if not EMAIL_PASSWORD:
+        log("⚠️ 未配置 EMAIL_PASSWORD，跳过邮件发送。")
+        return
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_USER
+    msg['To'] = EMAIL_TO
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body_markdown, 'plain', 'utf-8'))
+    try:
+        server = smtplib.SMTP('smtp.office365.com', 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        server.quit()
+        log(f"✅ 邮件已成功发送至 {EMAIL_TO}")
+    except Exception as e:
+        log(f"❌ 邮件发送失败: {e}")
 
+# ==========================================
+# 2. 智能生成模块 (主动交替 + 严格限流)
+# ==========================================
 def call_gemini(prompt, is_json=False):
-    """调用 Google Gemini"""
+    """底层：调用 Gemini"""
     try:
         config = types.GenerateContentConfig(response_mime_type="application/json") if is_json else None
-        response = client_gemini.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=config
-        )
+        response = client_gemini.models.generate_content(model=GEMINI_MODEL, contents=prompt, config=config)
         return response.text
-    except Exception as e:
-        # 抛出异常让上层捕获，以便切换模型
-        raise e
+    except Exception as e: raise e
 
 def call_zhipu(prompt, is_json=False):
-    """调用智谱 GLM-4 (使用你提供的 requests 方式)"""
+    """底层：调用智谱 GLM-4"""
+    if not ZHIPU_API_KEY: raise Exception("No Zhipu Key Configured")
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    
-    # 构造 GLM 的 prompt 格式
-    messages = [
-        {"role": "system", "content": "你是一个专业的生物信息学科研助手。请直接输出结果，不要废话。"},
-        {"role": "user", "content": prompt}
-    ]
-    
-    # 如果需要 JSON，我们在 System Prompt 里强调一下（GLM-4-Flash 对 JSON mode 支持视版本而定，这里通过 Prompt 约束）
-    if is_json:
-        messages[0]["content"] += " 请务必输出严格的 JSON 格式，不要包含 Markdown 代码块标记。"
-
-    payload = {
-        "model": "glm-4-flash", # 使用性价比高的 Flash 版本
-        "messages": messages,
-        "stream": False,
-        "temperature": 0.5, # 科研任务稍微降低创造性
-        "thinking": { "type": "disabled" } # 暂时关掉 thinking 以免干扰 JSON 解析，除非你需要思维链
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {ZHIPU_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
+    messages = [{"role": "system", "content": "你是一个生物信息学科研助手。"}, {"role": "user", "content": prompt}]
+    if is_json: messages[0]["content"] += " 请输出严格JSON。"
+    payload = {"model": "glm-4-flash", "messages": messages, "stream": False, "temperature": 0.5}
+    headers = {"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"}
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=60) # 设置60秒超时
-        resp_json = resp.json()
-        
-        # 解析响应
-        if "choices" in resp_json:
-            content = resp_json['choices'][0]['message']['content']
-            #以此清理可能的 markdown 标记
-            content = content.replace("```json", "").replace("```", "").strip()
-            return content
-        elif "error" in resp_json:
-            raise Exception(f"Zhipu API Error: {resp_json['error']}")
-        else:
-            raise Exception(f"Unknown Zhipu Response: {resp.text}")
-            
-    except Exception as e:
-        raise e
+        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        return resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip()
+    except Exception as e: raise e
 
-def hybrid_generate_content(prompt, is_json=False):
+def generate_with_strategy(prompt, preferred_engine="gemini", is_json=False):
     """
-    [智能混合调用]
-    策略：优先 Gemini -> 失败/限流 -> 切换 GLM-4 -> 再失败 -> 休息重试
+    [核心逻辑] 根据指定的首选引擎尝试生成
+    返回: (content, used_engine)
     """
-    # 1. 尝试 Gemini (主力)
-    try:
-        # log("   ⚡ [Gemini] 正在思考...")
-        return call_gemini(prompt, is_json)
-    except Exception as e:
-        error_str = str(e)
-        
-        # 2. 如果 Gemini 挂了 (429 限流 或 500 错误)，且配置了智谱 Key
-        if ("429" in error_str or "RESOURCE_EXHAUSTED" in error_str) and ZHIPU_API_KEY:
-            log(f"   ⚠️ Gemini 限流/报错，自动切换至 [智谱GLM-4] 接力...")
+    # 1. 尝试首选引擎
+    if preferred_engine == "gemini":
+        try:
+            return call_gemini(prompt, is_json), "gemini"
+        except Exception as e:
+            log(f"   ⚠️ Gemini 失败 ({e})，尝试切换智谱...")
+            # 失败则回退到智谱
             try:
-                return call_zhipu(prompt, is_json)
-            except Exception as e_zhipu:
-                log(f"   ❌ 智谱也挂了: {e_zhipu}")
-                # 两个都挂了，只能休息等待了
-                time.sleep(30)
-                return None
-        
-        # 如果没配置智谱 Key，只能硬等
-        elif "429" in error_str:
-             log(f"   ⚠️ Gemini 限流，无备用模型，等待 30秒...")
-             time.sleep(30)
-             return None
-        else:
-            log(f"   ❌ API 未知错误: {e}")
-            return None
+                if ZHIPU_API_KEY: return call_zhipu(prompt, is_json), "zhipu"
+            except: pass
+            
+    elif preferred_engine == "zhipu":
+        try:
+            if ZHIPU_API_KEY: return call_zhipu(prompt, is_json), "zhipu"
+            else: raise Exception("No Zhipu Key")
+        except Exception as e:
+            log(f"   ⚠️ 智谱 失败 ({e})，尝试切换 Gemini...")
+            # 失败则回退到 Gemini
+            try:
+                return call_gemini(prompt, is_json), "gemini"
+            except: pass
+
+    return None, "none"
 
 # ==========================================
-# 2. 搜索策略
+# 2. 搜索策略：宽召回 (Broad Recall)
 # ==========================================
+# 策略：用最少的词，覆盖最大的面。不要太细，太细了会漏。
 SEARCH_KEYWORDS = [
-    "single-cell", "scRNA-seq", "spatial transcriptomics", "chromatin accessibility",
-    "foundation model", "transformer", "deep learning genomics",
-    "plant", "Arabidopsis", "rice", "maize", "crop breeding"
+    # --- 方向1: 植物单细胞 & 图谱 ---
+    "plant single-cell", "scRNA-seq", "spatial transcriptomics", "cell atlas",
+    
+    # --- 方向2: 数据整合 & 多组学 ---
+    "data integration", "multi-omics", "reference mapping",
+    
+    # --- 方向3: AI育种 & 基础模型 ---
+    "foundation model", "deep learning genomics", "AI breeding", "trait prediction",
+    
+    # --- 核心物种限制 (辅助) ---
+    "plant", "Arabidopsis", "rice", "maize" 
 ]
+
+# 预编译正则 (保持不变)
 COMPILED_PATTERNS = [re.compile(rf'\b{re.escape(k.lower())}\b') for k in SEARCH_KEYWORDS]
 
 # ==========================================
 # 3. Prompt: 阶段一 (裁判 - 评分与分类)
 # ==========================================
 RELEVANCE_PROMPT_TEMPLATE = """
-You are a domain expert in **Plant single-cell biology** and **AI-driven crop breeding**.
-Your task is to JUDGE the relevance of this paper.
+You are a domain expert in **Plant Single-Cell**, **Data Integration**, and **AI Breeding**.
+Your task is to JUDGE the relevance of this paper based on the user's specific research interests.
 
+User's Core Interests:
+1. **Plant Single-Cell**: scRNA-seq atlas, spatial transcriptomics, developmental trajectory.
+2. **Data Integration**: Cross-species/dataset integration, batch correction, reference mapping, foundation models for representation learning.
+3. **Plant AI Breeding**: Genotype-to-phenotype prediction, regulatory variant effect, crop improvement using AI.
+
+Paper Metadata:
 Title: {title}
 Abstract: {abstract}
 
-Step 1: Relevance Scoring (0-3)
-- Plant relevance (0: None, 3: Core plant study)
-- Single-cell/Omics relevance (0: None, 3: Core single-cell/spatial)
-- AI/Modeling relevance (0: None, 3: Deep learning/Foundation model)
-- Breeding relevance (0: None, 3: Trait prediction/Improvement)
+Step 1: Relevance Scoring (0-3) for EACH dimension:
+- **Plant/Crop Relevance**: (0=None, 1=General Bio, 2=Plant Related, 3=Core Plant/Crop Study)
+- **Single-Cell/Omics Relevance**: (0=None, 1=Bulk, 2=Single-Cell/Spatial/Multi-omics, 3=Atlas/Integration Level)
+- **AI/Algorithm Relevance**: (0=None, 1=Stats, 2=ML/DL Application, 3=Foundation Model/New Algorithm)
+- **Breeding/Function Relevance**: (0=None, 1=Basic Bio, 2=Functional study, 3=Breeding/Trait Prediction)
 
 Step 2: Extract Species
-- Extract the main organism/species studied (e.g., "Rice (Oryza sativa)", "Arabidopsis", "Human", "General Model").
+- Extract the main organism (e.g., "Rice", "Maize", "Arabidopsis", "General Method").
 
-Step 3: Decision
-- KEEP: Highly relevant.
-- DROP: Totally irrelevant.
+Step 3: Decision Logic (Strict)
+- **KEEP**: If the paper matches AT LEAST ONE of the User's Core Interests strongly (Score >= 2 in relevant dimensions).
+    - Example: A generic AI method for single-cell integration is KEEP (transferable).
+    - Example: A pure clinical human study is DROP.
+- **DROP**: If strictly irrelevant (e.g., human cancer drug trials, pure math without bio application).
 
-Step 4: Tagging
-- ATLAS, METHOD, APPLICATION, BREEDING
+Step 4: Auto-Tagging
+- Select tags: [ATLAS], [INTEGRATION], [AI_BREEDING], [METHOD], [SPATIAL], [MULTI_OMICS]
 
 Output JSON format only:
 {{
@@ -178,7 +177,7 @@ Output JSON format only:
   "species": "String",
   "decision": "KEEP" | "DROP",
   "tags": ["TAG1", "TAG2"],
-  "reason": "Short reason"
+  "reason": "One short sentence explaining why it matches the user's interests."
 }}
 """
 
@@ -232,17 +231,16 @@ Tags: {tags}
 # 5. 工具函数
 # ==========================================
 def parse_pubmed_abstract(article_data):
-    abstract_obj = article_data.get('Abstract', {}).get('AbstractText', [])
-    if not abstract_obj: return "No Abstract"
-    parts = []
-    items = abstract_obj if isinstance(abstract_obj, list) else [abstract_obj]
-    for item in items:
-        if isinstance(item, str): parts.append(item)
-        elif isinstance(item, dict):
-            text = item.get('#text') or item.get('content') or ""
-            label = item.get('Label', '')
-            parts.append(f"**{label}**: {text}" if label else text)
-    return " ".join(parts)
+    try:
+        abstract_obj = article_data.get('Abstract', {}).get('AbstractText', [])
+        if not abstract_obj: return "No Abstract"
+        parts = []
+        items = abstract_obj if isinstance(abstract_obj, list) else [abstract_obj]
+        for item in items:
+            if isinstance(item, str): parts.append(item)
+            elif isinstance(item, dict): parts.append(item.get('#text') or "")
+        return " ".join(parts)
+    except: return "No Abstract"
 
 def is_duplicate(seen_set, title, source):
     key = (title.lower().strip(), source)
@@ -251,225 +249,173 @@ def is_duplicate(seen_set, title, source):
     return False
 
 # ==========================================
-# 6. 核心逻辑：AI 裁判 (Judge)
-# ==========================================
-def evaluate_paper_relevance(paper):
-    """调用混合模型判断论文"""
-    prompt = RELEVANCE_PROMPT_TEMPLATE.format(
-        title=paper['title'],
-        abstract=paper['abstract']
-    )
-    
-    # 使用混合调用接口
-    response_text = hybrid_generate_content(prompt, is_json=True)
-    
-    if response_text:
-        try:
-            return json.loads(response_text)
-        except:
-            # 简单的 JSON 修复尝试
-            try:
-                start = response_text.find('{')
-                end = response_text.rfind('}') + 1
-                return json.loads(response_text[start:end])
-            except:
-                return {"decision": "KEEP", "tags": ["PARSE_ERROR"], "species": "Unknown", "reason": "JSON Error"}
-    return {"decision": "DROP", "tags": [], "reason": "API Error"}
-
-# ==========================================
-# 7. 核心逻辑：AI 参谋 (Analyst)
-# ==========================================
-def generate_deep_dive(paper, evaluation):
-    """深度解读"""
-    transfer_hint = "如果是人类研究，重点分析如何迁移到植物细胞壁/多倍体场景。"
-    if "METHOD" in evaluation['tags']:
-        transfer_hint += " 重点关注算法是否能处理植物数据的稀疏性。"
-
-    prompt = DEEP_DIVE_PROMPT_TEMPLATE.format(
-        title=paper['title'],
-        source=paper['source'],
-        date=paper['date'],
-        tags=",".join(evaluation['tags']),
-        species=evaluation.get('species', 'N/A'),
-        transfer_hint=transfer_hint,
-        abstract=paper['abstract']
-    )
-    
-    # 使用混合调用接口
-    response_text = hybrid_generate_content(prompt, is_json=False)
-    
-    if response_text:
-        return response_text
-    return f"> ❌ 解读失败：所有模型均无响应。"
-
-# ==========================================
-# 8. 抓取函数
-# ==========================================
-def fetch_arxiv(seen_set, max_results=10):
-    log("📡 [ArXiv] 宽范围搜索中...")
-    papers = []
-    query = ' OR '.join([f'ti:"{k}"' for k in SEARCH_KEYWORDS[:5]]) + \
-            ' OR ' + ' OR '.join([f'abs:"{k}"' for k in SEARCH_KEYWORDS[:5]])
-    client_arxiv = arxiv.Client(page_size=max_results, delay_seconds=3, num_retries=3)
-    search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.SubmittedDate)
-    try:
-        for result in client_arxiv.results(search):
-            if is_duplicate(seen_set, result.title, "ArXiv"): continue
-            papers.append({
-                "title": result.title, "abstract": result.summary,
-                "url": result.entry_id, "date": result.published.strftime("%Y-%m-%d"),
-                "source": "ArXiv"
-            })
-    except Exception as e: log(f"⚠️ ArXiv Error: {e}")
-    return papers
-
-def fetch_biorxiv(seen_set, limit=10):
-    log("📡 [BioRxiv] 宽范围搜索中...")
-    papers = []
-    try:
-        today = datetime.date.today()
-        from_date = today - datetime.timedelta(days=7)
-        cursor = "0"
-        total_fetched = 0
-        while True:
-            url = f"https://api.biorxiv.org/details/biorxiv/{from_date}/{today}/{cursor}/json"
-            resp = requests.get(url).json()
-            collection = resp.get('collection', [])
-            messages = resp.get('messages', [{}])[0]
-            if not collection: break
-            for item in collection:
-                if total_fetched >= limit: break
-                title = item['title']
-                if is_duplicate(seen_set, title, "BioRxiv"): continue
-                text_check = (title + item['abstract']).lower()
-                if any(k.lower() in text_check for k in SEARCH_KEYWORDS):
-                    papers.append({
-                        "title": title, "abstract": item['abstract'],
-                        "url": f"https://doi.org/{item['doi']}", "date": item['date'],
-                        "source": "BioRxiv"
-                    })
-                    total_fetched += 1
-            new_cursor = messages.get('next-cursor')
-            if not new_cursor or str(new_cursor) == str(cursor) or total_fetched >= limit: break
-            cursor = str(new_cursor)
-            time.sleep(1)
-    except Exception as e: log(f"⚠️ BioRxiv Error: {e}")
-    return papers
-
-def fetch_pubmed(seen_set, max_results=5):
-    log("📡 [PubMed] 宽范围搜索中...")
-    papers = []
-    today_str = datetime.date.today().strftime("%Y/%m/%d")
-    past_str = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y/%m/%d")
-    date_term = f' AND ("{past_str}"[PDAT] : "{today_str}"[PDAT])'
-    term = ' OR '.join([f'({k})' for k in SEARCH_KEYWORDS]) + date_term
-    try:
-        handle = Entrez.esearch(db="pubmed", term=term, retmax=max_results, sort="date")
-        record = Entrez.read(handle)
-        id_list = record["IdList"]
-        handle.close()
-        if not id_list: return []
-        time.sleep(2)
-        handle = Entrez.efetch(db="pubmed", id=id_list, rettype="abstract", retmode="xml")
-        records = Entrez.read(handle)
-        handle.close()
-        for article in records['PubmedArticle']:
-            try:
-                article_data = article['MedlineCitation']['Article']
-                title = article_data['ArticleTitle']
-                if is_duplicate(seen_set, title, "PubMed"): continue
-                papers.append({
-                    "title": title, "abstract": parse_pubmed_abstract(article_data),
-                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{article['MedlineCitation']['PMID']}/",
-                    "date": today_str, "source": "PubMed"
-                })
-            except: continue
-    except Exception as e: log(f"⚠️ PubMed Error: {e}")
-    return papers
-
-# ==========================================
-# 9. 主流程
+# 6. 核心流程 (严格慢速交替)
 # ==========================================
 def process_papers(papers):
-    
-    # 1. 评分阶段
-    log(f"⚖️ 开始第一轮筛选 (共 {len(papers)} 篇)...")
+    log(f"⚖️ 开始筛选 {len(papers)} 篇论文 (慢速交替模式)...")
     kept_papers = []
     
-    for paper in papers:
-        eval_result = evaluate_paper_relevance(paper)
+    # 引擎切换开关: 0=Gemini, 1=Zhipu
+    engine_toggle = 0 
+    
+    # --- Phase 1: 评分筛选 ---
+    for i, paper in enumerate(papers):
+        # 决定当前用哪个引擎
+        current_engine = "gemini" if (engine_toggle % 2 == 0) else "zhipu"
         
-        decision = eval_result.get('decision', 'DROP')
-        species = eval_result.get('species', 'N/A')
-        log(f"   -> {paper['title'][:20]}... | {decision} | {species}")
+        log(f"   [{i+1}/{len(papers)}] 正在评分 (引擎: {current_engine})...")
         
-        if decision == "KEEP":
+        prompt = RELEVANCE_PROMPT_TEMPLATE.format(title=paper['title'], abstract=paper['abstract'])
+        
+        # 执行调用
+        resp, used_engine = generate_with_strategy(prompt, preferred_engine=current_engine, is_json=True)
+        
+        # 处理结果
+        try:
+            eval_result = json.loads(resp)
+        except:
+            eval_result = {"decision": "KEEP", "tags": ["ERROR"], "species": "N/A"} # 容错
+            
+        if eval_result.get('decision') == "KEEP":
             paper['eval'] = eval_result
             kept_papers.append(paper)
-        
-        time.sleep(1) # 稍微减少等待，因为有双模型切换保障
-
-    if not kept_papers:
-        return "", 0
-
-    # 2. 排序阶段
-    log("🔄 正在智能排序...")
-    def sort_key(p):
-        plant_score = p['eval'].get('plant_score', 0)
-        ai_score = p['eval'].get('ai_score', 0)
-        if plant_score >= 2: return (0, -plant_score, -ai_score)
-        elif ai_score >= 2: return (1, -ai_score, -plant_score)
-        else: return (2, -ai_score, -plant_score)
+            log(f"     -> ✅ KEEP")
+        else:
+            log(f"     -> ⏭️ DROP")
             
-    kept_papers.sort(key=sort_key)
+        # [关键] 根据实际使用的引擎，执行严格冷却
+        if used_engine == "gemini":
+            log(f"     ⏳ Gemini 完成，休息 {GEMINI_COOLDOWN} 秒...")
+            time.sleep(GEMINI_COOLDOWN)
+        elif used_engine == "zhipu":
+            log(f"     ⏳ 智谱 完成，休息 {ZHIPU_COOLDOWN} 秒...")
+            time.sleep(ZHIPU_COOLDOWN)
+        else:
+            time.sleep(10) # 失败时的默认短休息
 
-    # 3. 研读阶段
-    log(f"🧠 开始深度研读 (入选 {len(kept_papers)} 篇)...")
+        # 切换开关，下次换另一个
+        engine_toggle += 1
+
+    if not kept_papers: return "", 0
+
+    # 2. 排序 (植物优先)
+    kept_papers.sort(key=lambda p: (
+        -p['eval'].get('plant_score', 0), 
+        -p['eval'].get('ai_score', 0)
+    ))
+
+    # --- Phase 2: 深度研读 ---
+    log(f"\n🧠 开始精读 {len(kept_papers)} 篇 (继续慢速交替)...")
     report_content = ""
     
-    for paper in kept_papers:
-        summary = generate_deep_dive(paper, paper['eval'])
+    # 继续使用之前的开关状态，保持交替
+    for i, paper in enumerate(kept_papers):
+        current_engine = "gemini" if (engine_toggle % 2 == 0) else "zhipu"
+        log(f"   [{i+1}/{len(kept_papers)}] 深度研读 (首选: {current_engine})...")
+
+        hint = "重点分析迁移到植物研究的潜力。"
+        if "METHOD" in paper['eval'].get('tags', []): hint += " 关注算法对稀疏数据的鲁棒性。"
         
-        report_content += summary
-        report_content += f"\n🔗 **原文直达**: [{paper['source']} Link]({paper['url']})\n"
-        tags = paper['eval'].get('tags', [])
-        plant_score = paper['eval'].get('plant_score', 0)
-        ai_score = paper['eval'].get('ai_score', 0)
-        report_content += f"> 🏷️ **自动标签**: `{', '.join(tags)}` | 📊 **评分**: Plant({plant_score}) AI({ai_score})\n"
-        report_content += "---\n\n"
+        prompt = DEEP_DIVE_PROMPT_TEMPLATE.format(
+            title=paper['title'], source=paper['source'], date=paper['date'],
+            tags=",".join(paper['eval'].get('tags', [])), species=paper['eval'].get('species', 'N/A'),
+            transfer_hint=hint, abstract=paper['abstract']
+        )
         
-        time.sleep(2) 
+        summary, used_engine = generate_with_strategy(prompt, preferred_engine=current_engine, is_json=False)
+        
+        if summary:
+            report_content += summary + f"\n🔗 **Link**: {paper['url']}\n---\n\n"
+        else:
+            report_content += f"> ❌ {paper['title']} 解读失败\n---\n\n"
+
+        # [关键] 再次执行严格冷却
+        if used_engine == "gemini":
+            log(f"     ⏳ Gemini 完成，休息 {GEMINI_COOLDOWN} 秒...")
+            time.sleep(GEMINI_COOLDOWN)
+        elif used_engine == "zhipu":
+            log(f"     ⏳ 智谱 完成，休息 {ZHIPU_COOLDOWN} 秒...")
+            time.sleep(ZHIPU_COOLDOWN)
+            
+        engine_toggle += 1
 
     return report_content, len(kept_papers)
 
+# 抓取函数 (保持)
+def fetch_arxiv(seen, limit=10):
+    log("📡 [ArXiv] Searching...")
+    papers = []
+    query = ' OR '.join([f'ti:"{k}"' for k in SEARCH_KEYWORDS[:6]]) 
+    try:
+        client = arxiv.Client(page_size=limit, delay_seconds=3, num_retries=3)
+        search = arxiv.Search(query=query, max_results=limit, sort_by=arxiv.SortCriterion.SubmittedDate)
+        for r in client.results(search):
+            if not is_duplicate(seen, r.title, "ArXiv"):
+                papers.append({"title": r.title, "abstract": r.summary, "url": r.entry_id, "date": r.published.strftime("%Y-%m-%d"), "source": "ArXiv"})
+    except Exception as e: log(f"ArXiv Error: {e}")
+    return papers
+
+def fetch_biorxiv(seen, limit=10):
+    log("📡 [BioRxiv] Searching...")
+    papers = []
+    try:
+        today = datetime.date.today()
+        from_date = today - datetime.timedelta(days=5)
+        url = f"https://api.biorxiv.org/details/biorxiv/{from_date}/{today}/0/json"
+        resp = requests.get(url).json()
+        for item in resp.get('collection', [])[:limit*2]: 
+            if len(papers) >= limit: break
+            if not is_duplicate(seen, item['title'], "BioRxiv"):
+                if any(k in (item['title']+item['abstract']).lower() for k in ["single-cell", "plant", "genomics", "deep learning"]):
+                    papers.append({"title": item['title'], "abstract": item['abstract'], "url": f"https://doi.org/{item['doi']}", "date": item['date'], "source": "BioRxiv"})
+    except Exception as e: log(f"BioRxiv Error: {e}")
+    return papers
+
+def fetch_pubmed(seen, limit=5):
+    log("📡 [PubMed] Searching...")
+    papers = []
+    today = datetime.date.today().strftime("%Y/%m/%d")
+    past = (datetime.date.today() - datetime.timedelta(days=5)).strftime("%Y/%m/%d")
+    term = ' OR '.join([f'({k})' for k in SEARCH_KEYWORDS[:8]]) + f' AND ("{past}"[PDAT] : "{today}"[PDAT])'
+    try:
+        handle = Entrez.esearch(db="pubmed", term=term, retmax=limit)
+        id_list = Entrez.read(handle)["IdList"]
+        if not id_list: return []
+        handle = Entrez.efetch(db="pubmed", id=id_list, rettype="abstract", retmode="xml")
+        records = Entrez.read(handle)
+        for art in records['PubmedArticle']:
+            try:
+                data = art['MedlineCitation']['Article']
+                title = data['ArticleTitle']
+                if not is_duplicate(seen, title, "PubMed"):
+                    papers.append({"title": title, "abstract": parse_pubmed_abstract(data), "url": f"https://pubmed.ncbi.nlm.nih.gov/{art['MedlineCitation']['PMID']}/", "date": today, "source": "PubMed"})
+            except: pass
+    except: pass
+    return papers
+
 def main():
-    log(f"🚀 启动 Bio-AI 情报 Agent (v13.0 Hybrid: Gemini + Zhipu)...")
-    seen_papers = set()
-    all_papers = []
+    log(f"🚀 Bio-AI Agent v15.0 (Strict Slow-Switch Mode)...")
+    seen = set()
+    all_p = []
+    all_p.extend(fetch_arxiv(seen, 15))
+    all_p.extend(fetch_biorxiv(seen, 15))
+    all_p.extend(fetch_pubmed(seen, 10))
     
-    all_papers.extend(fetch_arxiv(seen_papers, max_results=10))
-    all_papers.extend(fetch_biorxiv(seen_papers, limit=10))
-    all_papers.extend(fetch_pubmed(seen_papers, max_results=5))
-    
-    log(f"\n📊 宽召回阶段：共获取 {len(all_papers)} 篇候选论文...\n")
-    
-    if not all_papers:
-        log("未获取到任何论文。")
+    if not all_p:
+        log("No papers found.")
         return
 
-    report_body, kept_count = process_papers(all_papers)
-
-    daily_report = f"# 🧠 Bio-AI 每日情报决策 ({datetime.date.today()})\n"
-    daily_report += f"> 📊 今日大盘：召回 {len(all_papers)} 篇 -> AI 严选 {kept_count} 篇\n"
-    daily_report += "> 🤖 引擎策略：Gemini 2.5 Flash (Main) + Zhipu GLM-4 (Backup)\n\n"
+    body, count = process_papers(all_p)
     
-    if kept_count == 0:
-        daily_report += "### 今日无高价值论文入选\n建议明天继续关注。\n"
-    else:
-        daily_report += report_body
+    report = f"# 🧠 Bio-AI Daily ({datetime.date.today()})\n"
+    report += f"> 📊 Scanned: {len(all_p)} | Selected: {count}\n"
+    report += f"> ⏳ Strategy: Gemini(5m) <-> Zhipu(3m)\n\n"
+    if count == 0: report += "No relevant papers today.\n"
+    else: report += body
 
-    print(daily_report)
-    log("\n✅ 任务完成。")
+    print(report)
+    log("📧 正在发送邮件...")
+    send_email(f"Bio-AI Report {datetime.date.today()}", report)
 
 if __name__ == "__main__":
     main()
