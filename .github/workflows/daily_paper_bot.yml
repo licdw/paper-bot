@@ -1,0 +1,43 @@
+name: Daily AI Paper Digest
+
+on:
+  schedule:
+    # 北京时间每天早上 08:00 (UTC 00:00)
+    - cron: '0 0 * * *'
+  # 允许手动触发测试
+  workflow_dispatch:
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      
+    steps:
+    - name: Check out repository code
+      uses: actions/checkout@v4  # 升级到 v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5  # 升级到 v5
+      with:
+        python-version: '3.12'  # 升级到 3.12
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run paper summarizer & Save output
+      env:
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      # Python 脚本中的 log() 会显示在 Actions 控制台
+      # Python 脚本中的 print() 会被写入 report.md
+      run: python main.py > report.md
+
+    - name: Upload Daily Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: Daily-Paper-Report
+        path: report.md
+        retention-days: 30
