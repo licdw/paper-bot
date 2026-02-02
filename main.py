@@ -1,43 +1,39 @@
 import arxiv
-import google.generativeai as genai
-import datetime
 import os
 import time
 import requests
 import re
-import sys  # [新增] 用于控制输出流
+import sys
 from Bio import Entrez
+# [核心改动] 引入新版 SDK
+from google import genai
 
 # ==========================================
-# 0. 日志辅助函数 (核心修复)
+# 0. 日志辅助函数
 # ==========================================
 def log(msg):
-    """
-    将日志打印到标准错误流 (stderr)。
-    这样在运行 'python main.py > report.md' 时，
-    日志会显示在屏幕(控制台)上，而不会污染 report.md 文件。
-    """
+    """将日志打印到标准错误流 (stderr)，不污染 report.md"""
     print(msg, file=sys.stderr)
 
 # ==========================================
 # 1. 基础配置与鉴权
 # ==========================================
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-# [必须修改] 请填入你的真实邮箱
-ENTREZ_EMAIL = "dongwei_li@hotmail.com" 
+ENTREZ_EMAIL = "dongwei_li@hotmail.com"  # [确认] 必须是你刚才修改过的真实邮箱
 
 if not GOOGLE_API_KEY:
     raise ValueError("❌ 未找到 GOOGLE_API_KEY，请检查环境变量设置")
 
 # 强制邮箱检查
 if "your_real_email" in ENTREZ_EMAIL or "@" not in ENTREZ_EMAIL:
-    # 使用 stderr 打印错误，确保能看到
-    log("❌ 错误：请修改 ENTREZ_EMAIL 为真实邮箱！使用默认/假邮箱会导致 IP 被 NCBI 封禁。")
+    log("❌ 错误：请修改 ENTREZ_EMAIL 为真实邮箱！")
     sys.exit(1)
 
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
 Entrez.email = ENTREZ_EMAIL
+
+# [核心改动] 初始化新版 Client
+# 注意：新库不需要 genai.configure，直接实例化 Client
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # ==========================================
 # 2. 多源检索关键词配置 & 正则预编译
@@ -147,7 +143,7 @@ def is_duplicate(seen_set, title, source):
     return False
 
 def contains_keywords(text):
-    """使用预编译正则进行全词匹配"""
+    """正则全词匹配"""
     text_lower = text.lower()
     for pattern in COMPILED_PATTERNS:
         if pattern.search(text_lower):
@@ -155,10 +151,10 @@ def contains_keywords(text):
     return False
 
 # ==========================================
-# 5. 各平台抓取函数 (使用 log() 替代 print())
+# 5. 各平台抓取函数
 # ==========================================
 
-def fetch_arxiv(seen_set, max_results=3):
+def fetch_arxiv(seen_set, max_results=5): # [优化] 增加到5篇
     log("📡 [ArXiv] 正在连接...")
     papers = []
     query = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat])
@@ -185,7 +181,7 @@ def fetch_biorxiv(seen_set, limit=4):
     papers = []
     try:
         today = datetime.date.today()
-        from_date = today - datetime.timedelta(days=3)
+        from_date = today - datetime.timedelta(days=10) # [优化] 保持10天搜索范围
         cursor = "0"
         total_fetched = 0
         
@@ -231,7 +227,7 @@ def fetch_pubmed(seen_set, max_results=3):
     log("📡 [PubMed] 正在连接...")
     papers = []
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    past_str = (datetime.date.today() - datetime.timedelta(days=3)).strftime("%Y/%m/%d")
+    past_str = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y/%m/%d") # [优化] 保持10天
     date_term = f' AND ("{past_str}"[PDAT] : "{today_str}"[PDAT])'
     
     term = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat]) + date_term
@@ -279,7 +275,6 @@ def fetch_pubmed(seen_set, max_results=3):
 def process_papers(papers):
     report_content = ""
     for paper in papers:
-        # 使用 log() 打印进度，不污染最终报告
         log(f"🤖 正在研读 ({paper['source']}): {paper['title'][:40]}...")
         
         prompt = PAPER_PROMPT_TEMPLATE.format(
@@ -290,7 +285,12 @@ def process_papers(papers):
         )
         
         try:
-            response = model.generate_content(prompt)
+            # [核心改动] 使用新版 SDK 调用方式
+            # 注意：新库方法是 client.models.generate_content
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=prompt
+            )
             summary = response.text
             
             if "❌" in summary and "不相关" in summary:
@@ -307,11 +307,11 @@ def process_papers(papers):
     return report_content
 
 def main():
-    log("🚀 启动 Bio-AI 全网情报抓取 (v6.0 Final)...")
+    log("🚀 启动 Bio-AI 全网情报抓取 (v7.0 Upgrade)...")
     seen_papers = set()
     all_papers = []
     
-    all_papers.extend(fetch_arxiv(seen_papers, max_results=3))
+    all_papers.extend(fetch_arxiv(seen_papers, max_results=5))
     all_papers.extend(fetch_biorxiv(seen_papers, limit=4))
     all_papers.extend(fetch_pubmed(seen_papers, max_results=3))
     
@@ -319,16 +319,12 @@ def main():
     
     if not all_papers:
         log("今日无符合条件的最新文献更新。")
-        # 即使没有论文，也打印一个空的提示，或者什么都不打印
         return
 
     daily_report = f"# 🧠 Bio-AI 每日思路研报 ({datetime.date.today()})\n"
     daily_report += "> 来源：ArXiv (AI/Method) | BioRxiv (Preprint) | PubMed (Published)\n\n"
     daily_report += process_papers(all_papers)
 
-    # ==========================================
-    # 唯一的一个 print (输出到 stdout)
-    # ==========================================
     print(daily_report)
 
     log("\n✅ 任务完成，报告已生成。")
