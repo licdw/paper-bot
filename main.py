@@ -1,39 +1,46 @@
 import arxiv
+import google.generativeai as genai  # [回退] 使用最稳定的旧版 SDK
+import datetime
 import os
 import time
 import requests
 import re
 import sys
-import datetime  # [已修复] 补回了这个关键模块
+import warnings
 from Bio import Entrez
-from google import genai
+
+# [新增] 忽略 SDK 弃用警告，保持日志干净
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # ==========================================
 # 0. 日志辅助函数
 # ==========================================
 def log(msg):
-    """将日志打印到标准错误流 (stderr)，不污染 report.md"""
+    """将日志打印到标准错误流 (stderr)"""
     print(msg, file=sys.stderr)
 
 # ==========================================
 # 1. 基础配置与鉴权
 # ==========================================
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-# [必须修改] 请确保这里填的是你的真实邮箱！
+# [已设置] 你的真实邮箱
 ENTREZ_EMAIL = "dongwei_li@hotmail.com" 
 
 if not GOOGLE_API_KEY:
     raise ValueError("❌ 未找到 GOOGLE_API_KEY，请检查环境变量设置")
 
-# 强制邮箱检查
-if "your_real_email" in ENTREZ_EMAIL or "@" not in ENTREZ_EMAIL:
-    log("❌ 错误：请修改 ENTREZ_EMAIL 为真实邮箱！")
+# 简单检查
+if "@" not in ENTREZ_EMAIL:
+    log("❌ 错误：邮箱格式不正确！")
     sys.exit(1)
 
-Entrez.email = ENTREZ_EMAIL
+# 配置 Gemini
+genai.configure(api_key=GOOGLE_API_KEY)
+# 初始化模型 (旧版 SDK 方式，最稳定)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# 初始化新版 Client
-client = genai.Client(api_key=GOOGLE_API_KEY)
+Entrez.email = ENTREZ_EMAIL
 
 # ==========================================
 # 2. 多源检索关键词配置 & 正则预编译
@@ -154,11 +161,12 @@ def contains_keywords(text):
 # 5. 各平台抓取函数
 # ==========================================
 
-def fetch_arxiv(seen_set, max_results=5): # [保持] 5篇
+def fetch_arxiv(seen_set, max_results=5):
     log("📡 [ArXiv] 正在连接...")
     papers = []
     query = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat])
     
+    # ArXiv Client 
     client = arxiv.Client(page_size=max_results, delay_seconds=3, num_retries=3)
     search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.SubmittedDate)
     
@@ -181,7 +189,7 @@ def fetch_biorxiv(seen_set, limit=4):
     papers = []
     try:
         today = datetime.date.today()
-        # [保持] 10天范围，确保能抓到论文
+        # [保持] 10天范围
         from_date = today - datetime.timedelta(days=10) 
         cursor = "0"
         total_fetched = 0
@@ -287,11 +295,8 @@ def process_papers(papers):
         )
         
         try:
-            # [新版 SDK 调用]
-            response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=prompt
-            )
+            # [旧版 SDK 调用] 最稳定，不会报错 404
+            response = model.generate_content(prompt)
             summary = response.text
             
             if "❌" in summary and "不相关" in summary:
@@ -308,7 +313,7 @@ def process_papers(papers):
     return report_content
 
 def main():
-    log("🚀 启动 Bio-AI 全网情报抓取 (v7.1 Fixed)...")
+    log("🚀 启动 Bio-AI 全网情报抓取 (v8.0 Stable)...")
     seen_papers = set()
     all_papers = []
     
