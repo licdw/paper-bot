@@ -4,9 +4,9 @@ import time
 import requests
 import re
 import sys
-import datetime  # [关键修复] 补全了 datetime 模块，防止报错
+import datetime
 from Bio import Entrez
-# [核心升级] 使用 Google 官方最新 SDK
+# 引入 Google 官方新版 SDK
 from google import genai
 
 # ==========================================
@@ -20,21 +20,25 @@ def log(msg):
 # 1. 基础配置与鉴权
 # ==========================================
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-# [已设置] 你的真实邮箱
+# [必须修改] 请填入你的真实邮箱
 ENTREZ_EMAIL = "dongwei_li@hotmail.com"
 
 if not GOOGLE_API_KEY:
     raise ValueError("❌ 未找到 GOOGLE_API_KEY，请检查环境变量设置")
 
-# 强制邮箱检查
 if "@" not in ENTREZ_EMAIL:
     log("❌ 错误：邮箱格式不正确！")
     sys.exit(1)
 
 Entrez.email = ENTREZ_EMAIL
 
-# [核心升级] 初始化新版 Client (这是新 SDK 的正确写法)
+# [新版 SDK 初始化]
 client = genai.Client(api_key=GOOGLE_API_KEY)
+
+# [核心决策] 根据官网信息，使用性价比最高的稳定版模型
+# 备选: "gemini-3-flash-preview" (如果想尝鲜)
+# 稳定: "gemini-2.5-flash" (推荐)
+MODEL_NAME = "gemini-2.5-flash"
 
 # ==========================================
 # 2. 多源检索关键词配置 & 正则预编译
@@ -160,11 +164,12 @@ def fetch_arxiv(seen_set, max_results=5):
     papers = []
     query = ' OR '.join([f'({k})' for cat in KEYWORDS_FOCUS.values() for k in cat])
     
-    client = arxiv.Client(page_size=max_results, delay_seconds=3, num_retries=3)
+    # ArXiv Client
+    client_arxiv = arxiv.Client(page_size=max_results, delay_seconds=3, num_retries=3)
     search = arxiv.Search(query=query, max_results=max_results, sort_by=arxiv.SortCriterion.SubmittedDate)
     
     try:
-        for result in client.results(search):
+        for result in client_arxiv.results(search):
             if is_duplicate(seen_set, result.title, "ArXiv"): continue
             papers.append({
                 "title": result.title,
@@ -182,7 +187,7 @@ def fetch_biorxiv(seen_set, limit=4):
     papers = []
     try:
         today = datetime.date.today()
-        # [保持] 10天范围，确保能抓到论文
+        # 10天范围
         from_date = today - datetime.timedelta(days=10) 
         cursor = "0"
         total_fetched = 0
@@ -227,7 +232,7 @@ def fetch_pubmed(seen_set, max_results=3):
     log("📡 [PubMed] 正在连接...")
     papers = []
     today_str = datetime.date.today().strftime("%Y/%m/%d")
-    # [保持] 10天范围
+    # 10天范围
     past_str = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y/%m/%d") 
     date_term = f' AND ("{past_str}"[PDAT] : "{today_str}"[PDAT])'
     
@@ -286,10 +291,9 @@ def process_papers(papers):
         )
         
         try:
-            # [核心升级] 使用新版 SDK 的标准调用方式
-            # 注意：不是 model.generate_content，而是 client.models.generate_content
+            # [核心] 使用新版 Google GenAI SDK 调用方式
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model=MODEL_NAME, # 使用 gemini-2.5-flash
                 contents=prompt
             )
             summary = response.text
@@ -301,14 +305,14 @@ def process_papers(papers):
             report_content += summary
             report_content += f"\n🔗 **原文直达**: [{paper['source']} Link]({paper['url']})\n"
             report_content += "---\n\n"
-            time.sleep(4)
+            time.sleep(2) # 新模型速度快，2秒间隔即可
             
         except Exception as e:
             log(f"   -> ❌ 分析失败: {e}")
     return report_content
 
 def main():
-    log("🚀 启动 Bio-AI 全网情报抓取 (v9.0 Final Migration)...")
+    log(f"🚀 启动 Bio-AI 全网情报抓取 (v10.0 | Model: {MODEL_NAME})...")
     seen_papers = set()
     all_papers = []
     
@@ -323,7 +327,7 @@ def main():
         return
 
     daily_report = f"# 🧠 Bio-AI 每日思路研报 ({datetime.date.today()})\n"
-    daily_report += "> 来源：ArXiv (AI/Method) | BioRxiv (Preprint) | PubMed (Published)\n\n"
+    daily_report += f"> 模型：{MODEL_NAME} | 来源：ArXiv, BioRxiv, PubMed\n\n"
     daily_report += process_papers(all_papers)
 
     print(daily_report)
